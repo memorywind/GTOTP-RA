@@ -154,7 +154,7 @@ class Issuer:
             roots.append(mt.root)
 
         # 真正的 Bloom 过滤器
-        self.bloom = BloomFilter(capacity=self.params.phi * 2, error_rate=BLOOM_ERROR_RATE)
+        self.bloom = BloomFilter(capacity=self.params.phi, error_rate=BLOOM_ERROR_RATE)
         for r in roots:
             self.bloom.add(r.hex())
 

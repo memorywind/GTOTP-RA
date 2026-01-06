@@ -31,9 +31,13 @@ def benchmark_storage(params: DAAParams, U: int):
 
     # 预生成所有成员的 vst_points
     members_vst = {}
+    provers = []
     for j in range(U):
         ID = f"user{j}"
         sk = secrets.token_bytes(16)
+        prover = Prover(ID, params, sk)
+        provers.append(prover)
+
         vst = []
         for i in range(params.E):
             seed = hmac_sha256(sk, ID.encode() + int.to_bytes(i, 4, 'big'))
@@ -43,16 +47,47 @@ def benchmark_storage(params: DAAParams, U: int):
 
     # 执行全局 join
     aux_dict = issuer.join_all(members_vst)
+    for prover in provers:
+        prover.receive_cred(aux_dict[prover.ID])
 
-    # 生成一个示例 sigma 用于测量凭证大小
-    example_prover = Prover("example", params, secrets.token_bytes(16))
-    first_id = next(iter(aux_dict))
-    example_prover.receive_cred(aux_dict[first_id])
-    example_message = b"authenticated message"
-    sigma = example_prover.sign(example_message)
-    sigma_size_bytes = recursive_size(sigma)
+    # 生成一个示例 sigma 用于详细分析
+    first_prover = provers[0]
+    current_i = 0
+    entry = first_prover.aux[current_i]
+    seed = hmac_sha256(first_prover.sk, first_prover.ID.encode() + int.to_bytes(current_i, 4, 'big'))
+    z = 0
+    pw = hash_power(seed, z)
 
-    # === 各组件存储量计算 (字节) ===
+    sigma = {
+        'pw': pw,
+        'tag': entry['tag'],
+        'sig': entry['sig'],
+        'proof': entry['proof'],
+        'i': current_i,
+        'T': time.time(),
+        'm': b"authenticated message",
+        'subset': entry['subset'],
+        'z': z
+    }
+
+    # === sigma 组件分解 ===
+    sigma_components = {
+        "pw (password)": len(sigma['pw']),
+        "tag": len(sigma['tag']),
+        "sig (RSA signature)": len(sigma['sig']),
+        "proof (Merkle path)": sum(len(node) for node, _ in sigma['proof']) if sigma['proof'] else 0,
+        "metadata (i, T, z, subset, m)": recursive_size({
+            'i': sigma['i'], 'T': sigma['T'], 'z': sigma['z'], 'subset': sigma['subset'], 'm': sigma['m']
+        }),
+        "Python dict overhead": recursive_size(sigma) - sum([
+            len(sigma['pw']), len(sigma['tag']), len(sigma['sig']),
+            sum(len(node) for node, _ in sigma['proof']) if sigma['proof'] else 0,
+            len(sigma['m'])
+        ])
+    }
+    sigma_total_bytes = recursive_size(sigma)
+
+    # === 系统组件 ===
     gvst_bits = issuer.bloom.num_bits if issuer.bloom else 0
     gvst_bytes = (gvst_bits + 7) // 8
 
@@ -64,43 +99,56 @@ def benchmark_storage(params: DAAParams, U: int):
 
     idtable_bytes = recursive_size(issuer.st_I)
 
-    total_aux_bytes = 0
-    for ID in aux_dict:
-        total_aux_bytes += recursive_size(aux_dict[ID])
-
+    total_aux_bytes = sum(recursive_size(aux_dict[ID]) for ID in aux_dict)
     avg_aux_per_member_bytes = total_aux_bytes // U if U > 0 else 0
 
-    # === 汇总计算 ===
-    issuer_total_bytes = gvst_bytes + merkle_bytes + idtable_bytes
-    provers_total_bytes = total_aux_bytes
-    system_total_bytes = issuer_total_bytes + provers_total_bytes
+    # === 实体存储量 ===
+    verifier_storage_bytes = gvst_bytes  # Verifier 只需 GVST
+    attester_avg_storage_bytes = avg_aux_per_member_bytes  # 每个 Attester 的 Aux
+    attesters_total_storage_bytes = total_aux_bytes
+    issuer_storage_bytes = gvst_bytes + merkle_bytes + idtable_bytes
+    system_total_bytes = issuer_storage_bytes + attesters_total_storage_bytes
 
-    # === 输出函数：KB + (MB) ===
+    # === 格式化 ===
     def fmt_kb_mb(bytes_val: int) -> str:
         kb = bytes_val / 1024
         mb = kb / 1024
         return f"{kb:.3f} KB ({mb:.3f} MB)"
 
-    results = {
-        "GVST (Bloom Filter) Size": fmt_kb_mb(gvst_bytes),
-        "Total Merkle Trees Size": fmt_kb_mb(merkle_bytes),
-        "IDTable Size": fmt_kb_mb(idtable_bytes),
-        "Total Aux Data Size": fmt_kb_mb(total_aux_bytes),
-        "Average Aux per Member": fmt_kb_mb(avg_aux_per_member_bytes),
-        "Single Sigma Size": fmt_kb_mb(sigma_size_bytes),
+    def fmt_bytes_kb(bytes_val: int) -> str:
+        kb = bytes_val / 1024
+        return f"{bytes_val} bytes ({kb:.3f} KB)"
 
-        "Issuer Total Storage (GVST + Merkle + IDTable)": fmt_kb_mb(issuer_total_bytes),
-        "Provers Total Storage (All Aux)": fmt_kb_mb(provers_total_bytes),
-        "System Overall Total Storage": fmt_kb_mb(system_total_bytes),  # 重点
-    }
+    print(f"\n=== Storage Benchmark (U={U}, E={params.E}, phi={params.phi}) ===\n")
 
-    return results
+    print("=== Single Sigma (Anonymous Credential) Component Breakdown ===")
+    for comp, size in sigma_components.items():
+        print(f"{comp:<40}: {fmt_bytes_kb(size)}")
+    print(f"{'Total Sigma Size':<40}: {fmt_bytes_kb(sigma_total_bytes)}")
+    print(f"{'':<40} ≈ {sigma_total_bytes / 1024:.3f} KB\n")
+
+    print("=== Entity Storage Overhead ===")
+    print(f"Verifier Storage (GVST only)             : {fmt_kb_mb(verifier_storage_bytes)}")
+    print(f"Each Attester (Prover) Storage (Aux)     : {fmt_kb_mb(attester_avg_storage_bytes)}")
+    print(f"All Attesters Total Storage (Aux)        : {fmt_kb_mb(attesters_total_storage_bytes)}")
+    print(f"Issuer Storage (GVST + Merkle + IDTable) : {fmt_kb_mb(issuer_storage_bytes)}")
+    print(f"System Overall Total Storage             : {fmt_kb_mb(system_total_bytes)}")
+
+    print("\n=== Detailed Component Breakdown ===")
+    print(f"GVST (Bloom Filter)                      : {fmt_kb_mb(gvst_bytes)}")
+    print(f"Total Merkle Trees                       : {fmt_kb_mb(merkle_bytes)}")
+    print(f"IDTable (Traceability)                   : {fmt_kb_mb(idtable_bytes)}")
+    print(f"Total Aux Data (All Provers)             : {fmt_kb_mb(total_aux_bytes)}")
+
+    print("\nNote: Verifier storage is constant (GVST only), independent of U and E.")
+    print("      Attesters store only their own auxiliary data (distributed).")
+    print("      Communication per authentication = Sigma size.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Storage Benchmark for DAA-GTOTP (KB + MB)")
-    parser.add_argument('--U', type=int, default=100, help='Number of members (group size)')
-    parser.add_argument('--E', type=int, default=60, help='Number of instances per member')
-    parser.add_argument('--phi', type=int, default=8192, help='Number of Merkle tree subsets')
+    parser = argparse.ArgumentParser(description="Storage Benchmark with Entity Breakdown")
+    parser.add_argument('--U', type=int, default=100, help='Number of members')
+    parser.add_argument('--E', type=int, default=60, help='Number of instances')
+    parser.add_argument('--phi', type=int, default=8192, help='Number of subsets')
     parser.add_argument('--delta_T', type=float, default=300.0, help='Instance lifecycle Δ_T in seconds')
     parser.add_argument('--delta_e', type=float, default=300.0, help='Verification period Δ_e in seconds')
     parser.add_argument('--delta_s', type=float, default=5.0, help='Password generation interval Δ_s in seconds')
@@ -124,11 +172,4 @@ if __name__ == "__main__":
         hk=secrets.token_bytes(16)
     )
 
-    print(f"\n=== Storage Benchmark (U={args.U}, E={args.E}, phi={args.phi}) ===")
-    results = benchmark_storage(params, args.U)
-
-    for key, value in results.items():
-        print(f"{key:<55}: {value}")
-
-    print("\nNote: Verifier only requires constant-size GVST.")
-    print("      System Overall Total Storage includes issuer and all provers (KB and MB shown).")
+    benchmark_storage(params, args.U)
