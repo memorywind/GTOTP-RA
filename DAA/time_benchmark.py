@@ -222,6 +222,7 @@ def benchmark_time(params: DAAParams, repeat: int, U: int):
     print("="*140)
 
 if __name__ == "__main__":
+    # python time_benchmark.py --U 4 --E 600 --phi 32 --delta_T 300 --delta_s 5 --repeat 10
     parser = argparse.ArgumentParser(description="Simplified Time Benchmark with 3 Sub-Ops per Algorithm")
     parser.add_argument('--U', type=int, default=100, help='Number of members')
     parser.add_argument('--E', type=int, default=288, help='Number of instances')
